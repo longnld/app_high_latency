@@ -1,6 +1,57 @@
 from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5.QtCore import QThread, pyqtSignal
 from latency_injecton import *
+import pickle
 
+def read_settings():
+	try:
+		with open("settings.dat", "rb") as f:
+			data = f.read()
+
+		# Deserialize the binary data into a Python object
+		settings = pickle.loads(data)
+
+		# Access the settings values
+		return [settings["expired"],settings["delay"],settings["running"]]
+	except FileNotFoundError:
+		raise("File does not exist")
+	
+def get_remain_days(expired_day):
+	from datetime import datetime
+	today = datetime.now()
+	delta = expired_day - today
+	if delta.total_seconds() >= 0:
+		return delta.days
+	
+
+class LatencyInjectionThread(QThread):
+	finished = pyqtSignal()
+
+	def __init__(self, pid, mt5_instance, delay, filter_expression):
+		super().__init__()
+		self.pid = pid
+		self.mt5_instance = mt5_instance
+		self.delay = delay
+		self.filter_expression = filter_expression
+		self.running = True
+		
+
+	
+	def run(self):
+		try:
+			delay = self.delay
+			filter_expression = (f'inbound and tcp.DstPort == {self.mt5_instance[1]} and ip.DstAddr == {self.mt5_instance[0]} ')
+			print(f"Pid {self.pid} ,Delay {self.delay}s",end="\n",flush=True)
+			latency_injection(filter_expression,delay)
+			self.finished.emit()
+		except Exception as e:
+			logging.error(f"Unexpected error: {e}")
+		print(f"{time.asctime()} running...",end="\r",flush=True)
+			
+
+	def stop(self):
+		self.running = False
+		
 class Ui_MainWindow(object):
 	def setupUi(self, MainWindow):
 		MainWindow.setObjectName("MainWindow")
@@ -25,7 +76,7 @@ class Ui_MainWindow(object):
 		self.saveButton = QtWidgets.QPushButton(self.scrollAreaWidgetContents)
 		self.saveButton.setGeometry(QtCore.QRect(300, 230, 93, 28))
 		self.saveButton.setObjectName("saveButton")
-		self.saveButton.clicked.connect(self.save)
+		# self.saveButton.clicked.connect(self.save)
 
 		self.delayLabel = QtWidgets.QLabel(self.scrollAreaWidgetContents)
 		self.delayLabel.setGeometry(QtCore.QRect(30, 40, 111, 16))
@@ -35,12 +86,12 @@ class Ui_MainWindow(object):
 		self.delayValue = QtWidgets.QSpinBox(self.scrollAreaWidgetContents)
 		self.delayValue.setGeometry(QtCore.QRect(180, 40, 151, 22))
 		self.delayValue.setObjectName("delayValue")
-		self.delayValue.valueChanged.connect(self.limitValues)
+		# self.delayValue.valueChanged.connect(self.limitValues)
  
 		self.stopButton = QtWidgets.QPushButton("Toggle",self.scrollAreaWidgetContents)
 		self.stopButton.setGeometry(QtCore.QRect(30, 230, 93, 28))
 		self.stopButton.setObjectName("stopButton")
-		self.stopButton.clicked.connect(self.statusToggle)
+		# self.stopButton.clicked.connect(self.statusToggle)
 
 		self.disable_toggle = QtWidgets.QCheckBox(self.scrollAreaWidgetContents)
 		self.disable_toggle.setGeometry(QtCore.QRect(30, 80, 101, 20))
@@ -119,7 +170,7 @@ class Ui_MainWindow(object):
 		self.saveButton.setText(_translate("MainWindow", "Save"))
 		self.delayLabel.setText(_translate("MainWindow", "Delay in (seconds) "))
 		self.expiredLabel.setText(_translate("MainWindow", "Disable after day"))
-		self.stopButton.setText(_translate("MainWindow", "Start"))
+		self.stopButton.setText(_translate("MainWindow", "Stop"))
 		self.disable_toggle.setText(_translate("MainWindow", "Auto Disable"))
 		# self.expiredTime.setHtml(_translate("MainWindow", "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.0//EN\" \"http://www.w3.org/TR/REC-html40/strict.dtd\">\n"
 		# 								"<html><head><meta name=\"qrichtext\" content=\"1\" /><style type=\"text/css\">\n"
@@ -133,111 +184,197 @@ class Ui_MainWindow(object):
 		self.pushButton_3.setText(_translate("MainWindow", "Add licenses"))
 		self.pushButton_4.setText(_translate("MainWindow", "Change Password"))
 	
-	def statusToggle(self):
-		pass
+ 		
+class MainWindow(QtWidgets.QMainWindow):
+	def __init__(self):
+		super().__init__()
+		self.ui = Ui_MainWindow()
+		self.ui.setupUi(self)
+		self.settings = read_settings()
+		self.running = self.settings[2]
+		if self.running:
+			self.ui.stopButton.setText("Stop")
+		else:
+			self.ui.stopButton.setText("Start")
+			
+		self.ui.delayValue.setValue(self.settings[1])
+		self.ui.expiredTime.setText(f"{get_remain_days(self.settings[0])}")
+
+		timer = QtCore.QTimer(self)
+		timer.timeout.connect(self.latency_injection)
+		timer.start(1000)
 		
+		self.ui.delayValue.valueChanged.connect(self.limitValues)
+		self.ui.stopButton.clicked.connect(self.toggle_running)
+		self.ui.saveButton.clicked.connect(self.save)
+
+	def print_complete(self):
+		print("completed")
+	
 	def limitValues(self):
-		if self.delayValue.value() > 30 :
-			self.delayValue.setValue(30) 
-		
+		if self.ui.delayValue.value() > 30 :
+			self.ui.delayValue.setValue(30)
+
+	def toggle_running(self):
+		self.running = not self.running
+		if self.running:
+			self.ui.stopButton.setText("Stop")
+
+		else:
+			self.ui.stopButton.setText("Start")
+
+
+	def latency_injection(self):		
+		global pid 
+		pid = get_pid()
+		if pid is None :
+			print(f"{time.asctime()} Didnt open MT5...",end="\r",flush=True)
+			self.ui.statusbar.showMessage("PLEASE OPEN METATRADER 5")
+		else:
+			mt5_instance = get_app_ip_and_port(pid)
+			delay = self.ui.delayValue.value()
+			filter_expression = (f'inbound and tcp.DstPort == {mt5_instance[1]} and ip.DstAddr == {mt5_instance[0]} ')
+			if self.running : 
+				thread = LatencyInjectionThread(pid, mt5_instance, delay, filter_expression)
+				thread.finished.connect(self.print_complete)
+				thread.start()	
+				thread.wait()
+				
+			else:
+				try:
+					thread.stop()
+					thread.wait()
+					thread.finished.connect(lambda: print("Thread finished"))
+					self.ui.statusbar.showMessage("Stopped")
+				except:
+					self.ui.statusbar.showMessage("Stopped")
+
 	def save(self):
-		delay_value = self.delayValue.value()
-		print(f"Delay value 	:{delay_value}")
-		print(f"Remain time     :{self.expiredTime.text()}")
-		import pickle
+		
+		print(f"Delay value 	:{self.ui.delayValue.value()}")
+		print(f"Remain time     :{self.ui.expiredTime.text()}")
 		with open('settings.dat', 'rb') as f:
 			data = pickle.load(f)
-
 		# Modify the data as required
-		data['delay'] = delay_value
-
+		data['delay']   = self.ui.delayValue.value()
+		data['running'] = self.running
 		# Save the updated data back to the file
 		with open('settings.dat', 'wb') as f:
 			pickle.dump(data, f)
-		
-
-
-
-def read_settings():
-	import pickle
-	with open("settings.dat", "rb") as f:
-		data = f.read()
-
-	# Deserialize the binary data into a Python object
-	settings = pickle.loads(data)
-
-	# Access the settings values
-	return [settings["expired"],settings["delay"]]
-
-
-def run_scripts(running,delay,pid):
-	if running:
-		if pid :
-			mt5_instance = get_app_ip_and_port(pid)
-			filter_expression = (f'inbound and tcp.DstPort == {mt5_instance[1]} and ip.DstAddr == {mt5_instance[0]} ')
-			try:
-				while running : 
-					  # delay in milliseconds
-					print(f"Pid {pid} ,Delay {delay}s",end="\r",flush=True)
-					latency_injection(filter_expression,delay)
-			except Exception as e:
-				logging.error(f"Unexpected error: {e}")
-
 
 if __name__ == "__main__":
 	import sys
-	from datetime import datetime
-
-	
-
 	app = QtWidgets.QApplication(sys.argv)
-	MainWindow = QtWidgets.QMainWindow()
-	ui = Ui_MainWindow()
-	ui.setupUi(MainWindow)
-
-	settings = read_settings()
-	expired_date = settings[0]
-	setting_delay = settings[1]
-	today = datetime.now()
-	delta = expired_date - today
-	if delta.total_seconds() >= 0:
-		ui.expiredTime.setText("{}".format(delta.days))
-	ui.delayValue.setValue(setting_delay)
-	MainWindow.show()
-	timer = QtCore.QTimer()
-	running = False 
-	pid = 0
-	def run():
-		global running
-		if running:
-			delay = ui.delayValue.value()
-			ui.statusbar.showMessage('Running...')
-			run_scripts(running ,delay,pid)	
-			
-		if not app.hasPendingEvents():
-			app.processEvents()
-
-
-	def toggle_running():
-		global running
-		running = not running
-		if running:
-			ui.stopButton.setText('Stop')
-			timer.timeout.connect(run)
-			timer.start(10)
-		else:
-			ui.stopButton.setText('Start')
-			ui.statusbar.showMessage('Stopped')
-			timer.stop()
-
-	try :
-		pid = get_pid()
-		ui.stopButton.clicked.connect(toggle_running)
-	except:
-		pid = None
-		ui.statusbar.showMessage('Please open MT5')	
+	main = MainWindow()
+	main.show()
 	
-
 	sys.exit(app.exec_())	
 
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# settings = read_settings()
+	# expired_date = settings[0]
+	# setting_delay = settings[1]
+	
+	
+	# running = False 
+	
+	# def run():
+	# 	global running
+	# 	if running:
+	# 		delay = ui.delayValue.value()
+	# 		ui.statusbar.showMessage('Running...')
+	# 		run_scripts(running ,delay,pid)	
+			
+	# 	if not app.hasPendingEvents():
+	# 		app.processEvents()
+
+
+	# def toggle_running():
+	# 	global running,script_runner
+	# 	running = not running
+	# 	print(running)
+	# 	if running:
+	# 		ui.stopButton.setText('Stop')
+	# 		script_runner = ScriptRunner(running, ui.delayValue.value(), pid)
+	# 		script_runner.start()
+	# 	else:
+	# 		ui.stopButton.setText('Start')
+	# 		ui.statusbar.showMessage('Stopped')
+	# 		script_runner.stop()
+	# 		script_runner.wait()
+	# 		del script_runner
+	# def check_pid():
+	# 	"""
+	# 	Check for the MT5 terminal process ID until it is found.
+	# 	"""
+	# global pid
+	# pid = get_pid()
+	# if pid is not None:
+	# 	ui.stopButton.clicked.connect(toggle_running)
+	# 	timer.stop()
+	# else:
+	# 	ui.statusbar.showMessage('Please open MT5')
+	# while running:
+	# 	timer = QtCore.QTimer()
+	# 	timer.timeout.connect(check_pid)
+	# 	timer.start(1000)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# def run_scripts(running,delay,pid):
+# 	if running:
+# 		if pid :
+
+
+# class ScriptRunner(QtCore.QThread):
+	
+# 	def __init__(self, running, delay, pid, parent=None):
+# 		super().__init__(parent)
+# 		self.running = running
+# 		self.delay = delay
+# 		self.pid = pid
+# 		self.stop_event = threading.Event()
+# 	def run(self):
+# 		while self.running and not self.stop_event.is_set():
+# 			run_scripts(self.running, self.delay, self.pid)
+# 			self.delay(1)
+
+# 	def stop(self):
+# 		self.stop_event.set()
 	
