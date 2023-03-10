@@ -2,7 +2,11 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import QThread, pyqtSignal
 from latency_injecton import *
 import pickle
+import ipaddress
+import logging
+logging.basicConfig(filename='app.log', level=logging.DEBUG, format='%(asctime)s %(levelname)s: %(message)s')
 
+	
 def read_settings():
 	try:
 		with open("settings.dat", "rb") as f:
@@ -17,41 +21,14 @@ def read_settings():
 		raise("File does not exist")
 	
 def get_remain_days(expired_day):
+
 	from datetime import datetime
 	today = datetime.now()
 	delta = expired_day - today
+
 	if delta.total_seconds() >= 0:
 		return delta.days
 	
-
-class LatencyInjectionThread(QThread):
-	finished = pyqtSignal()
-
-	def __init__(self, pid, mt5_instance, delay, filter_expression):
-		super().__init__()
-		self.pid = pid
-		self.mt5_instance = mt5_instance
-		self.delay = delay
-		self.filter_expression = filter_expression
-		self.running = True
-		
-
-	
-	def run(self):
-		try:
-			delay = self.delay
-			filter_expression = (f'inbound and tcp.DstPort == {self.mt5_instance[1]} and ip.DstAddr == {self.mt5_instance[0]} ')
-			print(f"Pid {self.pid} ,Delay {self.delay}s",end="\n",flush=True)
-			latency_injection(filter_expression,delay)
-			self.finished.emit()
-		except Exception as e:
-			logging.error(f"Unexpected error: {e}")
-		print(f"{time.asctime()} running...",end="\r",flush=True)
-			
-
-	def stop(self):
-		self.running = False
-		
 class Ui_MainWindow(object):
 	def setupUi(self, MainWindow):
 		MainWindow.setObjectName("MainWindow")
@@ -200,14 +177,11 @@ class MainWindow(QtWidgets.QMainWindow):
 		self.ui.delayValue.setValue(self.settings[1])
 		self.ui.expiredTime.setText(f"{get_remain_days(self.settings[0])}")
 
-		timer = QtCore.QTimer(self)
-		timer.timeout.connect(self.latency_injection)
-		timer.start(1000)
-		
 		self.ui.delayValue.valueChanged.connect(self.limitValues)
 		self.ui.stopButton.clicked.connect(self.toggle_running)
 		self.ui.saveButton.clicked.connect(self.save)
 
+		
 	def print_complete(self):
 		print("completed")
 	
@@ -216,39 +190,40 @@ class MainWindow(QtWidgets.QMainWindow):
 			self.ui.delayValue.setValue(30)
 
 	def toggle_running(self):
-		self.running = not self.running
-		if self.running:
-			self.ui.stopButton.setText("Stop")
-
-		else:
-			self.ui.stopButton.setText("Start")
-
-
-	def latency_injection(self):		
 		global pid 
 		pid = get_pid()
+		logging.debug(f"Pid {pid}")
 		if pid is None :
 			print(f"{time.asctime()} Didnt open MT5...",end="\r",flush=True)
 			self.ui.statusbar.showMessage("PLEASE OPEN METATRADER 5")
 		else:
+			self.running = not self.running
 			mt5_instance = get_app_ip_and_port(pid)
 			delay = self.ui.delayValue.value()
-			filter_expression = (f'inbound and tcp.DstPort == {mt5_instance[1]} and ip.DstAddr == {mt5_instance[0]} ')
-			if self.running : 
-				thread = LatencyInjectionThread(pid, mt5_instance, delay, filter_expression)
-				thread.finished.connect(self.print_complete)
-				thread.start()	
-				thread.wait()
-				
+			filter_expression=""
+			if isinstance(ipaddress.ip_address(mt5_instance[0][0]),ipaddress.IPv4Address):
+				filter_expression = (f'inbound and tcp.DstPort == {mt5_instance[0][1]} and ip.DstAddr == {mt5_instance[0][0]} ')
 			else:
-				try:
-					thread.stop()
-					thread.wait()
-					thread.finished.connect(lambda: print("Thread finished"))
-					self.ui.statusbar.showMessage("Stopped")
-				except:
-					self.ui.statusbar.showMessage("Stopped")
+				filter_expression = (f'inbound and tcp.DstPort == {mt5_instance[0][1]} ')
+			logging.debug(f"filter expression {filter_expression}")
+			
+			if self.running:
+					self.ui.stopButton.setText("Stop")
+					self.ui.statusbar.showMessage("Running...")
+					try:
+						global t 
+						t = threading.Thread(target=capture,args=[filter_expression,delay])
+						t.start()
+					except Exception as e:
+						logging.error(f"Unexpected error: {e}")
+	
+			else:
+		
+				self.ui.stopButton.setText("Start")
+				self.ui.statusbar.showMessage("Stopped")
 
+	
+		
 	def save(self):
 		
 		print(f"Delay value 	:{self.ui.delayValue.value()}")
